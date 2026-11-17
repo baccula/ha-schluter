@@ -29,3 +29,22 @@ Apache-2.0 for the integration. The prepared source is now on its main branch.
 Focused mypy (`--follow-imports=silent`) passes all five integration source
 modules after removal of an invalid override marker on the dynamic reauth step.
 Workflow security audit (zizmor) reports no findings, with 12 suppressions.
+
+## Published prerelease
+
+[0.1.0rc2](https://github.com/baccula/ha-schluter/releases/tag/v0.1.0rc2)
+was published by the repository-scoped workflow on November 17. The exact
+release commit passed hosted validation:
+https://github.com/baccula/ha-schluter/actions/runs/44186049526.
+The workflow uploaded the CI artifact and a SHA256SUMS asset; GitHub's asset
+digests were verified against the release notes and expected checksum contents.
+
+Published archive SHA256: `956a049b333ee5b1a53f3aca820a757cea632d0702bddf17d3d73a892b9708e4`.
+ZIP timestamps differ from the local build; all 14 packaged file contents were
+verified identical between the CI and local builds before publication.
+
+Marketplace validation passed 8 of 10 checks. The remaining checks require a
+repository description and topics. GitHub denied editing these repository
+settings through the connection (HTTP 403), so the maintainer was asked to add
+them before validation is rerun. The failed job did not report an integration
+manifest, license, brands, or package-metadata error.

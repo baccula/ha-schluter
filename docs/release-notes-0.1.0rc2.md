@@ -20,10 +20,12 @@ integration domain-collision warning remains. The corrected config-flow modules
 pass HA pylint. An official Silver tier is not claimed, and broader Core
 submission checks and independent library publication remain pending.
 
-Attach `dist/schluter.zip` to the prerelease. Its SHA256 is:
+The published `schluter.zip` asset has this SHA256:
 
-`66089389d9726bc19285c3689b481daafacfc02fb8be89d6630942f23e0a7b40`
+`956a049b333ee5b1a53f3aca820a757cea632d0702bddf17d3d73a892b9708e4`
 
 Follow the README for backup, migration and rollback. Setting a target retains
 the existing permanent/manual behavior and disables vacation mode. Thermostat
 scheduling continues independently during cloud outages.
+
+Published release: https://github.com/baccula/ha-schluter/releases/tag/v0.1.0rc2
