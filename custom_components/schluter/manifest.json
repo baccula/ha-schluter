@@ -1,0 +1,20 @@
+{
+  "domain": "schluter",
+  "name": "Schluter",
+  "categories": [
+    "climate.thermostats_heating"
+  ],
+  "codeowners": [
+    "@baccula"
+  ],
+  "config_flow": true,
+  "connectivity": [
+    "cloud"
+  ],
+  "documentation": "https://github.com/baccula/ha-schluter",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/baccula/ha-schluter/issues",
+  "requirements": [],
+  "version": "0.1.0rc2"
+}

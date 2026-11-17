@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "schluter-wifi"
+version = "0.1.0"
+description = "Async Schluter DITRA-HEAT E Wi-Fi client"
+requires-python = ">=3.14"
+dependencies = ["aiohttp>=3.13,<4"]
+license = "MIT"
+license-files = ["LICENSE"]
+
+[project.urls]
+Source = "https://github.com/baccula/ha-schluter"
+Issues = "https://github.com/baccula/ha-schluter/issues"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+schluter_wifi = ["py.typed"]

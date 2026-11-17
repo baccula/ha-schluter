@@ -1,0 +1,1404 @@
+diff --git a/CODEOWNERS b/CODEOWNERS
+index 067897bd..a6d5cce0 100644
+--- a/CODEOWNERS
++++ b/CODEOWNERS
+@@ -1713,7 +1713,8 @@ CLAUDE.md @home-assistant/core
+ /tests/components/schedule/ @home-assistant/core
+ /homeassistant/components/schlage/ @dknowles2
+ /tests/components/schlage/ @dknowles2
+-/homeassistant/components/schluter/ @prairieapps
++/homeassistant/components/schluter/ @baccula @prairieapps
++/tests/components/schluter/ @baccula @prairieapps
+ /homeassistant/components/scorpiontrack/ @Herbertmt978
+ /tests/components/scorpiontrack/ @Herbertmt978
+ /homeassistant/components/scrape/ @fabaff @gjohansson-ST
+diff --git a/homeassistant/components/schluter/__init__.py b/homeassistant/components/schluter/__init__.py
+index 07ec7daf..a7cc1833 100644
+--- a/homeassistant/components/schluter/__init__.py
++++ b/homeassistant/components/schluter/__init__.py
+@@ -1,28 +1,23 @@
+ """The Schluter DITRA-HEAT integration."""
+ 
+-import logging
+-
+ import probatio
+-from requests import RequestException, Session
+-from schluter.api import Api
+-from schluter.authenticator import AuthenticationState, Authenticator
++from schluter_wifi import SchluterClient
+ 
++from homeassistant.config_entries import SOURCE_IMPORT
+ from homeassistant.const import CONF_PASSWORD, CONF_USERNAME, Platform
+ from homeassistant.core import HomeAssistant
+-from homeassistant.helpers import config_validation as cv, discovery
++from homeassistant.helpers import config_validation as cv
++from homeassistant.helpers.aiohttp_client import async_get_clientsession
+ from homeassistant.helpers.typing import ConfigType
+ 
+ from .const import DOMAIN
++from .coordinator import SchluterConfigEntry, SchluterCoordinator
+ 
+-_LOGGER = logging.getLogger(__name__)
+-DATA_SCHLUTER_SESSION = "schluter_session"
+-DATA_SCHLUTER_API = "schluter_api"
+-SCHLUTER_CONFIG_FILE = ".schluter.conf"
+-API_TIMEOUT = 10
++PLATFORMS = [Platform.CLIMATE]
+ 
+ CONFIG_SCHEMA = probatio.Schema(
+     {
+-        probatio.Required(DOMAIN): probatio.Schema(
++        probatio.Optional(DOMAIN): probatio.Schema(
+             {
+                 probatio.Required(CONF_USERNAME): cv.string,
+                 probatio.Required(probatio.Secret(CONF_PASSWORD)): cv.string,
+@@ -33,43 +28,30 @@ CONFIG_SCHEMA = probatio.Schema(
+ )
+ 
+ 
+-def setup(hass: HomeAssistant, config: ConfigType) -> bool:
+-    """Set up the Schluter component."""
+-    _LOGGER.debug("Starting setup of schluter")
++async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
++    """Import legacy YAML without overwriting credentials managed in the UI."""
++    if DOMAIN in config:
++        hass.async_create_task(
++            hass.config_entries.flow.async_init(
++                DOMAIN, context={"source": SOURCE_IMPORT}, data=config[DOMAIN]
++            )
++        )
++    return True
+ 
+-    conf = config[DOMAIN]
+-    api_http_session = Session()
+-    api = Api(timeout=API_TIMEOUT, http_session=api_http_session)
+ 
+-    authenticator = Authenticator(
+-        api,
+-        conf.get(CONF_USERNAME),
+-        conf.get(CONF_PASSWORD),
+-        session_id_cache_file=hass.config.path(SCHLUTER_CONFIG_FILE),
++async def async_setup_entry(hass: HomeAssistant, entry: SchluterConfigEntry) -> None:
++    """Set up an account and defer transient startup failures to HA's retries."""
++    client = SchluterClient(
++        async_get_clientsession(hass),
++        entry.data[CONF_USERNAME],
++        entry.data[CONF_PASSWORD],
+     )
++    coordinator = SchluterCoordinator(hass, entry, client)
++    await coordinator.async_config_entry_first_refresh()
++    entry.runtime_data = coordinator
++    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+ 
+-    authentication = None
+-    try:
+-        authentication = authenticator.authenticate()
+-    except RequestException as ex:
+-        _LOGGER.error("Unable to connect to Schluter service: %s", ex)
+-        return False
+-
+-    state = authentication.state
+-
+-    if state == AuthenticationState.AUTHENTICATED:
+-        hass.data[DOMAIN] = {
+-            DATA_SCHLUTER_API: api,
+-            DATA_SCHLUTER_SESSION: authentication.session_id,
+-        }
+-        discovery.load_platform(hass, Platform.CLIMATE, DOMAIN, {}, config)
+-        return True
+-    if state == AuthenticationState.BAD_PASSWORD:
+-        _LOGGER.error("Invalid password provided")
+-        return False
+-    if state == AuthenticationState.BAD_EMAIL:
+-        _LOGGER.error("Invalid email provided")
+-        return False
+ 
+-    _LOGGER.error("Unknown set up error: %s", state)
+-    return False
++async def async_unload_entry(hass: HomeAssistant, entry: SchluterConfigEntry) -> None:
++    """Unload the entities and the coordinator's registered polling callbacks."""
++    await hass.config_entries.async_unload_platforms_or_raise(entry, PLATFORMS)
+diff --git a/homeassistant/components/schluter/climate.py b/homeassistant/components/schluter/climate.py
+index 7a43cc7b..5b72e46b 100644
+--- a/homeassistant/components/schluter/climate.py
++++ b/homeassistant/components/schluter/climate.py
+@@ -1,156 +1,159 @@
+-"""Support for Schluter thermostats."""
++"""Climate entities for Schluter DITRA-HEAT thermostats."""
+ 
+ import logging
+ from typing import Any, override
+ 
+-import probatio
+-from requests import RequestException
++from schluter_wifi import AuthenticationError, SchluterError, Thermostat
+ 
+ from homeassistant.components.climate import (
+-    PLATFORM_SCHEMA as CLIMATE_PLATFORM_SCHEMA,
+-    SCAN_INTERVAL,
+     ClimateEntity,
+     ClimateEntityFeature,
+     HVACAction,
+     HVACMode,
+ )
+-from homeassistant.const import ATTR_TEMPERATURE, CONF_SCAN_INTERVAL, UnitOfTemperature
+-from homeassistant.core import HomeAssistant
++from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
++from homeassistant.core import HomeAssistant, callback
+ from homeassistant.exceptions import HomeAssistantError
+-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+-from homeassistant.helpers.update_coordinator import (
+-    CoordinatorEntity,
+-    DataUpdateCoordinator,
+-    UpdateFailed,
+-)
++from homeassistant.helpers.device_registry import DeviceInfo
++from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
++from homeassistant.helpers.update_coordinator import CoordinatorEntity
+ 
+-from . import DATA_SCHLUTER_API, DATA_SCHLUTER_SESSION
+ from .const import DOMAIN
++from .coordinator import SchluterConfigEntry, SchluterCoordinator
+ 
+ _LOGGER = logging.getLogger(__name__)
+-PLATFORM_SCHEMA = CLIMATE_PLATFORM_SCHEMA.extend(
+-    {
+-        probatio.Optional(CONF_SCAN_INTERVAL): probatio.All(
+-            probatio.Coerce(int), probatio.Range(min=1)
+-        )
+-    }
+-)
++PARALLEL_UPDATES = 1
+ 
+ 
+-async def async_setup_platform(
++async def async_setup_entry(
+     hass: HomeAssistant,
+-    config: ConfigType,
+-    async_add_entities: AddEntitiesCallback,
+-    discovery_info: DiscoveryInfoType | None = None,
++    entry: SchluterConfigEntry,
++    async_add_entities: AddConfigEntryEntitiesCallback,
+ ) -> None:
+-    """Set up the Schluter thermostats."""
+-    if discovery_info is None:
+-        return
+-    session_id = hass.data[DOMAIN][DATA_SCHLUTER_SESSION]
+-    api = hass.data[DOMAIN][DATA_SCHLUTER_API]
+-
+-    async def async_update_data():
+-        try:
+-            thermostats = await hass.async_add_executor_job(
+-                api.get_thermostats, session_id
++    """Add existing thermostats and discover new ones on later updates."""
++    coordinator = entry.runtime_data
++    known: set[str] = set()
++
++    @callback
++    def async_add_new_devices() -> None:
++        new = coordinator.data.keys() - known
++        if new:
++            known.update(new)
++            async_add_entities(
++                SchluterThermostat(coordinator, serial) for serial in sorted(new)
+             )
+-        except RequestException as err:
+-            raise UpdateFailed(f"Error communicating with Schluter API: {err}") from err
+-
+-        if thermostats is None:
+-            return {}
+-
+-        return {thermo.serial_number: thermo for thermo in thermostats}
+ 
+-    coordinator = DataUpdateCoordinator(
+-        hass,
+-        _LOGGER,
+-        config_entry=None,
+-        name="schluter",
+-        update_method=async_update_data,
+-        update_interval=SCAN_INTERVAL,
+-    )
++    async_add_new_devices()
++    entry.async_on_unload(coordinator.async_add_listener(async_add_new_devices))
+ 
+-    await coordinator.async_refresh()
+ 
+-    async_add_entities(
+-        SchluterThermostat(coordinator, serial_number, api, session_id)
+-        for serial_number, thermostat in coordinator.data.items()
+-    )
+-
+-
+-class SchluterThermostat(CoordinatorEntity, ClimateEntity):
+-    """Representation of a Schluter thermostat."""
++class SchluterThermostat(CoordinatorEntity[SchluterCoordinator], ClimateEntity):
++    """A thermostat with a stable serial identity across YAML migration."""
+ 
++    _attr_has_entity_name = True
++    _attr_name = None
+     _attr_hvac_mode = HVACMode.HEAT
+     _attr_hvac_modes = [HVACMode.HEAT]
+     _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
+     _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
+ 
+-    def __init__(self, coordinator, serial_number, api, session_id):
+-        """Initialize the thermostat."""
++    def __init__(self, coordinator: SchluterCoordinator, serial_number: str) -> None:
++        """Initialize with the legacy serial-number unique ID."""
+         super().__init__(coordinator)
+         self._serial_number = serial_number
+-        self._api = api
+-        self._session_id = session_id
+         self._attr_unique_id = serial_number
++        self._last_thermostat = coordinator.data[serial_number]
++        self._device_available = self._last_thermostat.online
++        self._attr_device_info = DeviceInfo(
++            identifiers={(DOMAIN, serial_number)},
++            manufacturer="Schluter",
++            name=self._last_thermostat.name,
++            sw_version=self._last_thermostat.software_version,
++        )
+ 
+     @property
++    def _thermostat(self) -> Thermostat:
++        return self.coordinator.data.get(self._serial_number, self._last_thermostat)
++
+     @override
+-    def name(self) -> str:
+-        """Return the name of the thermostat."""
+-        return self.coordinator.data[self._serial_number].name
++    async def async_added_to_hass(self) -> None:
++        """Report devices that were already offline at startup."""
++        await super().async_added_to_hass()
++        if not self._device_available:
++            _LOGGER.warning("Thermostat %s is offline or missing", self.entity_id)
+ 
+     @property
+     @override
+-    def native_current_temperature(self) -> float:
+-        """Return the current temperature."""
+-        return self.coordinator.data[self._serial_number].temperature
++    def available(self) -> bool:
++        return (
++            super().available
++            and self._serial_number in self.coordinator.data
++            and self._thermostat.online
++        )
++
++    @callback
++    @override
++    def _handle_coordinator_update(self) -> None:
++        if self.coordinator.last_update_success:
++            available = (
++                self._serial_number in self.coordinator.data and self._thermostat.online
++            )
++            if available != self._device_available:
++                if available:
++                    _LOGGER.info(
++                        "Communication with thermostat %s restored", self.entity_id
++                    )
++                else:
++                    _LOGGER.warning(
++                        "Thermostat %s is offline or missing", self.entity_id
++                    )
++                self._device_available = available
++            self._last_thermostat = self._thermostat
++        super()._handle_coordinator_update()
+ 
+     @property
+     @override
+-    def hvac_action(self) -> HVACAction:
+-        """Return current operation. Can only be heating or idle."""
+-        if self.coordinator.data[self._serial_number].is_heating:
+-            return HVACAction.HEATING
+-        return HVACAction.IDLE
++    def native_current_temperature(self) -> float:
++        return self._thermostat.temperature
+ 
+     @property
+     @override
+     def native_target_temperature(self) -> float:
+-        """Return the temperature we try to reach."""
+-        return self.coordinator.data[self._serial_number].set_point_temp
++        return self._thermostat.target_temperature
+ 
+     @property
+     @override
+     def min_temp(self) -> float:
+-        """Identify min_temp in Schluter API."""
+-        return self.coordinator.data[self._serial_number].min_temp
++        return self._thermostat.min_temperature
+ 
+     @property
+     @override
+     def max_temp(self) -> float:
+-        """Identify max_temp in Schluter API."""
+-        return self.coordinator.data[self._serial_number].max_temp
++        return self._thermostat.max_temperature
++
++    @property
++    @override
++    def hvac_action(self) -> HVACAction:
++        return HVACAction.HEATING if self._thermostat.heating else HVACAction.IDLE
+ 
+     @override
+     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+-        """Mode is always heating, so do nothing."""
++        """Retain the existing heat-only mode."""
+ 
+     @override
+-    def set_temperature(self, **kwargs: Any) -> None:
+-        """Set new target temperature."""
+-        target_temp = None
+-        target_temp = kwargs.get(ATTR_TEMPERATURE)
+-        serial_number = self.coordinator.data[self._serial_number].serial_number
+-        _LOGGER.debug("Setting thermostat temperature: %s", target_temp)
+-
++    async def async_set_temperature(self, **kwargs: Any) -> None:
++        """Set a permanent target and refresh the service's authoritative state."""
+         try:
+-            if target_temp is not None:
+-                self._api.set_temperature(self._session_id, serial_number, target_temp)
+-        except RequestException as ex:
++            await self.coordinator.client.async_set_temperature(
++                self._serial_number, kwargs[ATTR_TEMPERATURE]
++            )
++        except AuthenticationError as err:
++            self.coordinator.config_entry.async_start_reauth(self.hass)
++            raise HomeAssistantError(
++                translation_domain=DOMAIN, translation_key="invalid_auth"
++            ) from err
++        except SchluterError as err:
+             raise HomeAssistantError(
+-                translation_domain=DOMAIN,
+-                translation_key="set_temperature_failed",
+-            ) from ex
++                translation_domain=DOMAIN, translation_key="set_temperature_failed"
++            ) from err
++        await self.coordinator.async_request_refresh()
+diff --git a/homeassistant/components/schluter/config_flow.py b/homeassistant/components/schluter/config_flow.py
+new file mode 100644
+index 00000000..61dbd3f5
+--- /dev/null
++++ b/homeassistant/components/schluter/config_flow.py
+@@ -0,0 +1,100 @@
++"""GUI configuration and YAML migration for Schluter."""
++
++from collections.abc import Mapping
++from typing import Any, override
++
++import probatio
++from schluter_wifi import AuthenticationError, SchluterClient, SchluterError
++
++from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
++from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
++from homeassistant.helpers.aiohttp_client import async_get_clientsession
++
++from .const import DOMAIN
++
++USER_SCHEMA = probatio.Schema(
++    {
++        probatio.Required(CONF_USERNAME): str,
++        probatio.Required(probatio.Secret(CONF_PASSWORD)): str,
++    }
++)
++PASSWORD_SCHEMA = probatio.Schema(
++    {probatio.Required(probatio.Secret(CONF_PASSWORD)): str}
++)
++
++
++class SchluterConfigFlow(ConfigFlow, domain=DOMAIN):
++    """Configure one entry per Schluter account."""
++
++    VERSION = 1
++
++    async def _async_validate(self, data: dict[str, Any]) -> str | None:
++        client = SchluterClient(
++            async_get_clientsession(self.hass), data[CONF_USERNAME], data[CONF_PASSWORD]
++        )
++        try:
++            await client.async_get_thermostats()
++        except AuthenticationError:
++            return "invalid_auth"
++        except SchluterError:
++            return "cannot_connect"
++        return None
++
++    @override
++    async def async_step_user(
++        self, user_input: dict[str, Any] | None = None
++    ) -> ConfigFlowResult:
++        """Validate credentials and connectivity before creating an entry."""
++        errors = {}
++        if user_input is not None:
++            user_input = {
++                **user_input,
++                CONF_USERNAME: user_input[CONF_USERNAME].strip().casefold(),
++            }
++            await self.async_set_unique_id(user_input[CONF_USERNAME])
++            self._abort_if_unique_id_configured()
++            if error := await self._async_validate(user_input):
++                errors["base"] = error
++            else:
++                return self.async_create_entry(
++                    title=user_input[CONF_USERNAME], data=user_input
++                )
++        return self.async_show_form(
++            step_id="user", data_schema=USER_SCHEMA, errors=errors
++        )
++
++    async def async_step_import(self, user_input: dict[str, Any]) -> ConfigFlowResult:
++        """Let entry setup retry an offline account during noninteractive migration."""
++        user_input = {
++            **user_input,
++            CONF_USERNAME: user_input[CONF_USERNAME].strip().casefold(),
++        }
++        await self.async_set_unique_id(user_input[CONF_USERNAME])
++        self._abort_if_unique_id_configured()
++        return self.async_create_entry(title=user_input[CONF_USERNAME], data=user_input)
++
++    @override
++    async def async_step_reauth(
++        self, entry_data: Mapping[str, Any]
++    ) -> ConfigFlowResult:
++        """Reauthenticate the existing account."""
++        return await self.async_step_reauth_confirm()
++
++    async def async_step_reauth_confirm(
++        self, user_input: dict[str, Any] | None = None
++    ) -> ConfigFlowResult:
++        """Replace the password only after validating the original account."""
++        entry = self._get_reauth_entry()
++        errors = {}
++        if user_input is not None:
++            data = {**entry.data, CONF_PASSWORD: user_input[CONF_PASSWORD]}
++            if error := await self._async_validate(data):
++                errors["base"] = error
++            else:
++                return self.async_update_reload_and_abort(entry, data=data)
++        return self.async_show_form(
++            step_id="reauth_confirm",
++            data_schema=PASSWORD_SCHEMA,
++            errors=errors,
++            description_placeholders={"username": entry.data[CONF_USERNAME]},
++        )
+diff --git a/homeassistant/components/schluter/coordinator.py b/homeassistant/components/schluter/coordinator.py
+new file mode 100644
+index 00000000..2a425c95
+--- /dev/null
++++ b/homeassistant/components/schluter/coordinator.py
+@@ -0,0 +1,60 @@
++"""Manage account polling and recoverable Schluter communication errors."""
++
++from datetime import timedelta
++import logging
++from typing import override
++
++from schluter_wifi import (
++    AuthenticationError,
++    RateLimitError,
++    SchluterClient,
++    SchluterError,
++    Thermostat,
++)
++
++from homeassistant.config_entries import ConfigEntry
++from homeassistant.core import HomeAssistant
++from homeassistant.exceptions import ConfigEntryAuthFailed
++from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
++
++from .const import DOMAIN
++
++_LOGGER = logging.getLogger(__name__)
++
++type SchluterConfigEntry = ConfigEntry[SchluterCoordinator]
++
++
++class SchluterCoordinator(DataUpdateCoordinator[dict[str, Thermostat]]):
++    """Keep polling after transient errors; reauthenticate rejected credentials."""
++
++    config_entry: SchluterConfigEntry
++
++    def __init__(
++        self, hass: HomeAssistant, entry: SchluterConfigEntry, client: SchluterClient
++    ) -> None:
++        """Initialize the account coordinator."""
++        super().__init__(
++            hass,
++            _LOGGER,
++            config_entry=entry,
++            name="Schluter",
++            update_interval=timedelta(seconds=60),
++            always_update=False,
++        )
++        self.client = client
++
++    @override
++    async def _async_update_data(self) -> dict[str, Thermostat]:
++        """Fetch current data without discarding the last successful snapshot."""
++        try:
++            return await self.client.async_get_thermostats()
++        except AuthenticationError as err:
++            raise ConfigEntryAuthFailed(
++                translation_domain=DOMAIN, translation_key="invalid_auth"
++            ) from err
++        except RateLimitError as err:
++            raise UpdateFailed(
++                "Schluter rate limit reached", retry_after=err.retry_after
++            ) from err
++        except SchluterError as err:
++            raise UpdateFailed(str(err)) from err
+diff --git a/homeassistant/components/schluter/manifest.json b/homeassistant/components/schluter/manifest.json
+index b7dfe8a1..cd02c2a6 100644
+--- a/homeassistant/components/schluter/manifest.json
++++ b/homeassistant/components/schluter/manifest.json
+@@ -2,11 +2,13 @@
+   "domain": "schluter",
+   "name": "Schluter",
+   "categories": ["climate.thermostats_heating"],
+-  "codeowners": ["@prairieapps"],
++  "codeowners": ["@baccula", "@prairieapps"],
++  "config_flow": true,
+   "connectivity": ["cloud"],
+   "documentation": "https://www.home-assistant.io/integrations/schluter",
++  "integration_type": "hub",
+   "iot_class": "cloud_polling",
+-  "loggers": ["schluter"],
+-  "quality_scale": "legacy",
+-  "requirements": ["py-schluter==0.1.7"]
++  "loggers": ["schluter_wifi"],
++  "quality_scale": "silver",
++  "requirements": ["schluter-wifi==0.1.0"]
+ }
+diff --git a/homeassistant/components/schluter/quality_scale.yaml b/homeassistant/components/schluter/quality_scale.yaml
+new file mode 100644
+index 00000000..2086ec51
+--- /dev/null
++++ b/homeassistant/components/schluter/quality_scale.yaml
+@@ -0,0 +1,67 @@
++rules:
++  action-setup:
++    status: exempt
++    comment: Uses the standard climate actions; no integration-specific actions.
++  appropriate-polling: done
++  brands: done
++  common-modules: done
++  config-flow: done
++  config-flow-test-coverage: done
++  dependency-transparency: done
++  docs-actions:
++    status: exempt
++    comment:
++      Uses the standard climate actions, documented with the permanent-mode
++      limitation.
++  docs-conditions:
++    status: exempt
++    comment: No integration-specific conditions.
++  docs-high-level-description: done
++  docs-installation-instructions: done
++  docs-removal-instructions: done
++  docs-triggers:
++    status: exempt
++    comment: No integration-specific triggers.
++  entity-event-setup: done
++  entity-unique-id: done
++  has-entity-name: done
++  runtime-data: done
++  test-before-configure: done
++  test-before-setup: done
++  unique-config-entry: done
++  action-exceptions: done
++  config-entry-unloading: done
++  docs-configuration-parameters:
++    status: exempt
++    comment: No options flow; polling is fixed at 60 seconds.
++  docs-installation-parameters: done
++  entity-unavailable: done
++  integration-owner: done
++  log-when-unavailable: done
++  parallel-updates: done
++  reauthentication-flow: done
++  test-coverage: done
++  devices: todo
++  diagnostics: todo
++  discovery: todo
++  discovery-update-info: todo
++  docs-data-update: todo
++  docs-examples: todo
++  docs-known-limitations: todo
++  docs-supported-devices: todo
++  docs-supported-functions: todo
++  docs-troubleshooting: todo
++  docs-use-cases: todo
++  dynamic-devices: todo
++  entity-category: todo
++  entity-device-class: todo
++  entity-disabled-by-default: todo
++  entity-translations: todo
++  exception-translations: todo
++  icon-translations: todo
++  reconfiguration-flow: todo
++  repair-issues: todo
++  stale-devices: todo
++  async-dependency: todo
++  inject-websession: todo
++  strict-typing: todo
+diff --git a/homeassistant/components/schluter/strings.json b/homeassistant/components/schluter/strings.json
+index 5135bd03..22eeeedb 100644
+--- a/homeassistant/components/schluter/strings.json
++++ b/homeassistant/components/schluter/strings.json
+@@ -1,7 +1,43 @@
+ {
++  "config": {
++    "abort": {
++      "already_configured": "This Schluter account is already configured."
++    },
++    "error": {
++      "cannot_connect": "Unable to connect to Schluter. Check your connection and try again.",
++      "invalid_auth": "Schluter rejected the email or password."
++    },
++    "step": {
++      "reauth_confirm": {
++        "data": {
++          "password": "Password"
++        },
++        "data_description": {
++          "password": "Your current Schluter account password."
++        },
++        "description": "Schluter rejected the credentials for {username}. Enter the current password.",
++        "title": "Reconnect your Schluter account"
++      },
++      "user": {
++        "data": {
++          "password": "Password",
++          "username": "Email"
++        },
++        "data_description": {
++          "password": "Your current Schluter account password.",
++          "username": "The email registered with your Schluter DITRA-HEAT account."
++        },
++        "description": "Enter the credentials for your Schluter DITRA-HEAT E Wi-Fi account. All thermostats registered to this account will be added.",
++        "title": "Connect your Schluter account"
++      }
++    }
++  },
+   "exceptions": {
++    "invalid_auth": {
++      "message": "Schluter rejected the account credentials. Reauthenticate the integration."
++    },
+     "set_temperature_failed": {
+-      "message": "Failed to set the thermostat temperature."
++      "message": "The temperature change could not be confirmed. Check the thermostat before trying again."
+     }
+   }
+ }
+diff --git a/homeassistant/generated/config_flows.py b/homeassistant/generated/config_flows.py
+index 9e07b63f..5f108785 100644
+--- a/homeassistant/generated/config_flows.py
++++ b/homeassistant/generated/config_flows.py
+@@ -730,6 +730,7 @@ FLOWS = {
+         "satel_integra",
+         "saunum",
+         "schlage",
++        "schluter",
+         "scorpiontrack",
+         "scrape",
+         "screenlogic",
+diff --git a/homeassistant/generated/integrations.json b/homeassistant/generated/integrations.json
+index 91284769..a1d2a8eb 100644
+--- a/homeassistant/generated/integrations.json
++++ b/homeassistant/generated/integrations.json
+@@ -13032,7 +13032,7 @@
+       "connectivity": [
+         "cloud"
+       ],
+-      "config_flow": false,
++      "config_flow": true,
+       "iot_class": "cloud_polling"
+     },
+     "scl": {
+diff --git a/requirements_all.txt b/requirements_all.txt
+index c3b7ec33..ca83f9a8 100644
+--- a/requirements_all.txt
++++ b/requirements_all.txt
+@@ -2070,9 +2070,6 @@ py-nymta==0.4.1
+ # homeassistant.components.opendisplay
+ py-opendisplay==7.18.1
+ 
+-# homeassistant.components.schluter
+-py-schluter==0.1.7
+-
+ # homeassistant.components.ecovacs
+ py-sucks==0.9.11
+ 
+@@ -3117,6 +3114,9 @@ sanix==1.0.6
+ # homeassistant.components.satel_integra
+ satel-integra==1.6.0
+ 
++# homeassistant.components.schluter
++schluter-wifi==0.1.0
++
+ # homeassistant.components.screenlogic
+ screenlogicpy==0.10.2
+ 
+diff --git a/script/hassfest/quality_scale.py b/script/hassfest/quality_scale.py
+index ce15e72f..399eaeec 100644
+--- a/script/hassfest/quality_scale.py
++++ b/script/hassfest/quality_scale.py
+@@ -761,7 +761,6 @@ INTEGRATIONS_WITHOUT_QUALITY_SCALE_FILE = [
+     "rympro",
+     "saj",
+     "sanix",
+-    "schluter",
+     "scrape",
+     "screenlogic",
+     "season",
+@@ -1681,7 +1680,6 @@ INTEGRATIONS_WITHOUT_SCALE = [
+     "saj",
+     "sanix",
+     "schlage",
+-    "schluter",
+     "scrape",
+     "screenlogic",
+     "season",
+diff --git a/tests/components/schluter/__init__.py b/tests/components/schluter/__init__.py
+new file mode 100644
+index 00000000..2cca85f9
+--- /dev/null
++++ b/tests/components/schluter/__init__.py
+@@ -0,0 +1 @@
++"""Tests for Schluter."""
+diff --git a/tests/components/schluter/conftest.py b/tests/components/schluter/conftest.py
+new file mode 100644
+index 00000000..5835ec57
+--- /dev/null
++++ b/tests/components/schluter/conftest.py
+@@ -0,0 +1,47 @@
++"""Fixtures for Schluter integration tests."""
++
++from collections.abc import Generator
++from unittest.mock import MagicMock, create_autospec, patch
++
++import pytest
++from pytest_homeassistant.common import MockConfigEntry
++from schluter_wifi import SchluterClient, Thermostat
++
++from homeassistant.core import HomeAssistant
++
++THERMOSTAT = Thermostat("TEST123", "Bathroom", 22.5, 24, 5, 40, True, True, "1.0")
++ACCOUNT = {"username": "test@example.com", "password": "test-password"}
++
++
++@pytest.fixture
++def mock_client() -> Generator[MagicMock]:
++    """Mock the API boundary, leaving all Home Assistant behavior real."""
++    client = create_autospec(SchluterClient, instance=True)
++    client.async_get_thermostats.return_value = {"TEST123": THERMOSTAT}
++    with (
++        patch("homeassistant.components.schluter.SchluterClient", return_value=client),
++        patch(
++            "homeassistant.components.schluter.config_flow.SchluterClient",
++            return_value=client,
++        ),
++    ):
++        yield client
++
++
++@pytest.fixture
++def config_entry() -> MockConfigEntry:
++    """An account with the new stable identity."""
++    return MockConfigEntry(
++        domain="schluter", data=ACCOUNT, unique_id="test@example.com"
++    )
++
++
++@pytest.fixture
++async def setup_integration(
++    hass: HomeAssistant, mock_client: MagicMock, config_entry: MockConfigEntry
++) -> MockConfigEntry:
++    """Set up through Home Assistant's entry lifecycle."""
++    config_entry.add_to_hass(hass)
++    assert await hass.config_entries.async_setup(config_entry.entry_id)
++    await hass.async_block_till_done()
++    return config_entry
+diff --git a/tests/components/schluter/test_climate.py b/tests/components/schluter/test_climate.py
+new file mode 100644
+index 00000000..2f499cbe
+--- /dev/null
++++ b/tests/components/schluter/test_climate.py
+@@ -0,0 +1,163 @@
++"""Test observable climate behavior and scheduled recovery without restarting."""
++
++from dataclasses import replace
++from datetime import timedelta
++from unittest.mock import MagicMock
++
++from freezegun.api import FrozenDateTimeFactory
++import pytest
++from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
++from schluter_wifi import (
++    AuthenticationError,
++    CommandError,
++    CommunicationError,
++    RateLimitError,
++)
++
++from homeassistant.core import HomeAssistant
++from homeassistant.exceptions import HomeAssistantError
++from homeassistant.util import dt as dt_util
++from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
++
++from .conftest import THERMOSTAT
++
++
++@pytest.mark.usefixtures("setup_integration")
++async def test_state_and_commands(hass: HomeAssistant, mock_client: MagicMock) -> None:
++    """Match the legacy temperature, limits, heat mode, and permanent setpoint."""
++    state = hass.states.get("climate.bathroom")
++    assert state.state == "heat"
++    assert state.attributes["current_temperature"] == 22.5
++    assert state.attributes["temperature"] == 24
++    assert state.attributes["hvac_action"] == "heating"
++    assert state.attributes["min_temp"] == 5
++    assert state.attributes["max_temp"] == 40
++    assert state.attributes["hvac_modes"] == ["heat"]
++    mock_client.async_get_thermostats.return_value = {
++        "TEST123": replace(THERMOSTAT, target_temperature=25, heating=False)
++    }
++    await hass.services.async_call(
++        "climate",
++        "set_temperature",
++        {"entity_id": "climate.bathroom", "temperature": 25},
++        blocking=True,
++    )
++    mock_client.async_set_temperature.assert_awaited_once_with("TEST123", 25)
++    state = hass.states.get("climate.bathroom")
++    assert state.attributes["temperature"] == 25
++    assert state.attributes["hvac_action"] == "idle"
++    await hass.services.async_call(
++        "climate",
++        "set_hvac_mode",
++        {"entity_id": "climate.bathroom", "hvac_mode": "heat"},
++        blocking=True,
++    )
++
++
++@pytest.mark.usefixtures("setup_integration")
++@pytest.mark.parametrize(
++    "error", [CommunicationError("Network offline"), RateLimitError(60)]
++)
++async def test_scheduled_recovery(
++    hass: HomeAssistant,
++    mock_client: MagicMock,
++    freezer: FrozenDateTimeFactory,
++    caplog: pytest.LogCaptureFixture,
++    error: Exception,
++) -> None:
++    """Several failed scheduled polls must not stop the next successful poll."""
++    mock_client.async_get_thermostats.side_effect = error
++    for _ in range(3):
++        freezer.tick(timedelta(seconds=70))
++        async_fire_time_changed(hass, dt_util.utcnow())
++        await hass.async_block_till_done()
++        assert hass.states.get("climate.bathroom").state == "unavailable"
++    assert caplog.text.count("Error fetching Schluter data") == 1
++    mock_client.async_get_thermostats.side_effect = None
++    freezer.tick(timedelta(seconds=70))
++    async_fire_time_changed(hass, dt_util.utcnow())
++    await hass.async_block_till_done()
++    assert hass.states.get("climate.bathroom").state == "heat"
++    assert mock_client.async_get_thermostats.await_count == 5
++
++
++@pytest.mark.usefixtures("setup_integration")
++@pytest.mark.parametrize("data", [{}, {"TEST123": replace(THERMOSTAT, online=False)}])
++async def test_missing_or_offline_recovers(
++    hass: HomeAssistant,
++    mock_client: MagicMock,
++    freezer: FrozenDateTimeFactory,
++    data: dict,
++    caplog: pytest.LogCaptureFixture,
++) -> None:
++    """Missing or offline devices recover with the same entity ID."""
++    mock_client.async_get_thermostats.return_value = data
++    for _ in range(2):
++        freezer.tick(timedelta(seconds=70))
++        async_fire_time_changed(hass, dt_util.utcnow())
++        await hass.async_block_till_done()
++        assert hass.states.get("climate.bathroom").state == "unavailable"
++    assert caplog.text.count("is offline or missing") == 1
++    mock_client.async_get_thermostats.return_value = {"TEST123": THERMOSTAT}
++    freezer.tick(timedelta(seconds=70))
++    async_fire_time_changed(hass, dt_util.utcnow())
++    await hass.async_block_till_done()
++    assert hass.states.get("climate.bathroom").state == "heat"
++    assert len(hass.states.async_entity_ids("climate")) == 1
++
++
++@pytest.mark.usefixtures("setup_integration")
++@pytest.mark.parametrize(
++    "error", [CommandError(), CommunicationError(), AuthenticationError()]
++)
++async def test_command_failure(
++    hass: HomeAssistant, mock_client: MagicMock, error: Exception
++) -> None:
++    """Do not claim an unconfirmed command succeeded or change the displayed target."""
++    mock_client.async_set_temperature.side_effect = error
++    with pytest.raises(HomeAssistantError):
++        await hass.services.async_call(
++            "climate",
++            "set_temperature",
++            {"entity_id": "climate.bathroom", "temperature": 25},
++            blocking=True,
++        )
++    assert hass.states.get("climate.bathroom").attributes["temperature"] == 24
++
++
++@pytest.mark.usefixtures("mock_client")
++async def test_fahrenheit(
++    hass: HomeAssistant, config_entry: MockConfigEntry, mock_client: MagicMock
++) -> None:
++    """Home Assistant converts US display and command temperatures exactly once."""
++    hass.config.units = US_CUSTOMARY_SYSTEM
++    config_entry.add_to_hass(hass)
++    assert await hass.config_entries.async_setup(config_entry.entry_id)
++    await hass.async_block_till_done()
++    state = hass.states.get("climate.bathroom")
++    assert state.attributes["temperature"] == 75
++    assert state.attributes["min_temp"] == 41
++    await hass.services.async_call(
++        "climate",
++        "set_temperature",
++        {"entity_id": "climate.bathroom", "temperature": 77},
++        blocking=True,
++    )
++    mock_client.async_set_temperature.assert_awaited_once_with("TEST123", 25)
++
++
++async def test_initially_offline(
++    hass: HomeAssistant,
++    config_entry: MockConfigEntry,
++    mock_client: MagicMock,
++    caplog: pytest.LogCaptureFixture,
++) -> None:
++    """Log a device that is offline before its first entity update."""
++    mock_client.async_get_thermostats.return_value = {
++        "TEST123": replace(THERMOSTAT, online=False)
++    }
++    config_entry.add_to_hass(hass)
++    assert await hass.config_entries.async_setup(config_entry.entry_id)
++    await hass.async_block_till_done()
++    assert hass.states.get("climate.bathroom").state == "unavailable"
++    assert caplog.text.count("is offline or missing") == 1
+diff --git a/tests/components/schluter/test_config_flow.py b/tests/components/schluter/test_config_flow.py
+new file mode 100644
+index 00000000..3f300b45
+--- /dev/null
++++ b/tests/components/schluter/test_config_flow.py
+@@ -0,0 +1,153 @@
++"""Test GUI setup, duplicate prevention, YAML import, and reauthentication."""
++
++from unittest.mock import MagicMock, patch
++
++import pytest
++from pytest_homeassistant.common import MockConfigEntry
++from schluter_wifi import AuthenticationError, CommunicationError
++
++from homeassistant.config_entries import SOURCE_IMPORT, SOURCE_USER
++from homeassistant.core import HomeAssistant
++from homeassistant.data_entry_flow import FlowResultType
++
++from .conftest import ACCOUNT
++
++
++async def test_user(hass: HomeAssistant, mock_client: MagicMock) -> None:
++    """Validate the account before setup and normalize its identity."""
++    result = await hass.config_entries.flow.async_init(
++        "schluter", context={"source": SOURCE_USER}
++    )
++    assert result["type"] is FlowResultType.FORM
++    with patch("homeassistant.components.schluter.async_setup_entry"):
++        result = await hass.config_entries.flow.async_configure(
++            result["flow_id"], {**ACCOUNT, "username": " Test@Example.COM "}
++        )
++        await hass.async_block_till_done()
++    assert result["type"] is FlowResultType.CREATE_ENTRY
++    assert result["data"] == ACCOUNT
++    assert result["result"].unique_id == "test@example.com"
++    mock_client.async_get_thermostats.assert_awaited_once()
++
++
++@pytest.mark.parametrize(
++    ("error", "key"),
++    [(AuthenticationError(), "invalid_auth"), (CommunicationError(), "cannot_connect")],
++)
++async def test_user_error(
++    hass: HomeAssistant, mock_client: MagicMock, error: Exception, key: str
++) -> None:
++    """Keep the form open after a recoverable validation error."""
++    mock_client.async_get_thermostats.side_effect = error
++    result = await hass.config_entries.flow.async_init(
++        "schluter", context={"source": SOURCE_USER}
++    )
++    assert result["type"] is FlowResultType.FORM
++    result = await hass.config_entries.flow.async_configure(result["flow_id"], ACCOUNT)
++    assert result["errors"] == {"base": key}
++    mock_client.async_get_thermostats.side_effect = None
++    with patch("homeassistant.components.schluter.async_setup_entry"):
++        result = await hass.config_entries.flow.async_configure(
++            result["flow_id"], ACCOUNT
++        )
++        await hass.async_block_till_done()
++    assert result["type"] is FlowResultType.CREATE_ENTRY
++
++
++@pytest.mark.usefixtures("mock_client")
++async def test_duplicate_import(
++    hass: HomeAssistant, config_entry: MockConfigEntry
++) -> None:
++    """Repeated YAML imports must not overwrite the GUI-managed password."""
++    config_entry.add_to_hass(hass)
++    result = await hass.config_entries.flow.async_init(
++        "schluter",
++        context={"source": SOURCE_IMPORT},
++        data={"username": " Test@EXAMPLE.com ", "password": "old-password"},
++    )
++    assert result["type"] is FlowResultType.ABORT
++    assert result["reason"] == "already_configured"
++    assert config_entry.data == ACCOUNT
++
++
++@pytest.mark.usefixtures("mock_client")
++async def test_duplicate_user(
++    hass: HomeAssistant, config_entry: MockConfigEntry
++) -> None:
++    """The GUI rejects an account that is already configured."""
++    config_entry.add_to_hass(hass)
++    result = await hass.config_entries.flow.async_init(
++        "schluter", context={"source": SOURCE_USER}
++    )
++    assert result["type"] is FlowResultType.FORM
++    result = await hass.config_entries.flow.async_configure(
++        result["flow_id"],
++        {"username": " Test@EXAMPLE.com ", "password": "old-password"},
++    )
++    assert result["type"] is FlowResultType.ABORT
++    assert result["reason"] == "already_configured"
++    assert config_entry.data == ACCOUNT
++
++
++async def test_import_offline(hass: HomeAssistant, mock_client: MagicMock) -> None:
++    """Preserve the account so setup retries can finish an offline YAML migration."""
++    mock_client.async_get_thermostats.side_effect = CommunicationError()
++    with patch("homeassistant.components.schluter.async_setup_entry"):
++        result = await hass.config_entries.flow.async_init(
++            "schluter", context={"source": SOURCE_IMPORT}, data=ACCOUNT
++        )
++        await hass.async_block_till_done()
++    assert result["type"] is FlowResultType.CREATE_ENTRY
++    mock_client.async_get_thermostats.assert_not_called()
++
++
++@pytest.mark.usefixtures("mock_client")
++async def test_reauth(hass: HomeAssistant, config_entry: MockConfigEntry) -> None:
++    """Updating credentials reloads the same entry and keeps its identity."""
++    config_entry.add_to_hass(hass)
++    config_entry.async_start_reauth(hass)
++    await hass.async_block_till_done()
++    flow = hass.config_entries.flow.async_progress()[0]
++    assert flow["step_id"] == "reauth_confirm"
++    with patch.object(hass.config_entries, "async_reload", return_value=True) as reload:
++        result = await hass.config_entries.flow.async_configure(
++            flow["flow_id"], {"password": "new-password"}
++        )
++        await hass.async_block_till_done()
++    assert result["type"] is FlowResultType.ABORT
++    assert result["reason"] == "reauth_successful"
++    assert config_entry.data == {**ACCOUNT, "password": "new-password"}
++    reload.assert_awaited_once_with(config_entry.entry_id)
++
++
++@pytest.mark.parametrize(
++    ("error", "key"),
++    [(AuthenticationError(), "invalid_auth"), (CommunicationError(), "cannot_connect")],
++)
++async def test_reauth_error(
++    hass: HomeAssistant,
++    mock_client: MagicMock,
++    config_entry: MockConfigEntry,
++    error: Exception,
++    key: str,
++) -> None:
++    """A failed reauthentication must leave the stored credentials intact."""
++    mock_client.async_get_thermostats.side_effect = error
++    config_entry.add_to_hass(hass)
++    config_entry.async_start_reauth(hass)
++    await hass.async_block_till_done()
++    flow = hass.config_entries.flow.async_progress()[0]
++    result = await hass.config_entries.flow.async_configure(
++        flow["flow_id"], {"password": "bad-password"}
++    )
++    assert result["errors"] == {"base": key}
++    assert config_entry.data == ACCOUNT
++    mock_client.async_get_thermostats.side_effect = None
++    with patch.object(hass.config_entries, "async_reload", return_value=True):
++        result = await hass.config_entries.flow.async_configure(
++            flow["flow_id"], {"password": "new-password"}
++        )
++        await hass.async_block_till_done()
++    assert result["type"] is FlowResultType.ABORT
++    assert result["reason"] == "reauth_successful"
++    assert config_entry.data == {**ACCOUNT, "password": "new-password"}
+diff --git a/tests/components/schluter/test_init.py b/tests/components/schluter/test_init.py
+new file mode 100644
+index 00000000..9ca96184
+--- /dev/null
++++ b/tests/components/schluter/test_init.py
+@@ -0,0 +1,112 @@
++"""Test startup retries, migration, and unloading."""
++
++from datetime import timedelta
++from unittest.mock import MagicMock
++
++from freezegun.api import FrozenDateTimeFactory
++import pytest
++from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
++from schluter_wifi import AuthenticationError, CommunicationError, RateLimitError
++
++from homeassistant.config_entries import ConfigEntryState
++from homeassistant.core import HomeAssistant
++from homeassistant.helpers import entity_registry as er
++from homeassistant.setup import async_setup_component
++from homeassistant.util import dt as dt_util
++
++from .conftest import ACCOUNT, THERMOSTAT
++
++
++@pytest.mark.parametrize(
++    "error", [CommunicationError("Service offline"), RateLimitError(60)]
++)
++async def test_setup_recovers(
++    hass: HomeAssistant,
++    mock_client: MagicMock,
++    config_entry: MockConfigEntry,
++    freezer: FrozenDateTimeFactory,
++    error: Exception,
++) -> None:
++    """A network outage during startup recovers on HA's scheduled retry."""
++    mock_client.async_get_thermostats.side_effect = error
++    config_entry.add_to_hass(hass)
++    assert not await hass.config_entries.async_setup(config_entry.entry_id)
++    assert config_entry.state is ConfigEntryState.SETUP_RETRY
++    mock_client.async_get_thermostats.side_effect = None
++    freezer.tick(timedelta(minutes=5))
++    async_fire_time_changed(hass, dt_util.utcnow())
++    await hass.async_block_till_done(wait_background_tasks=True)
++    assert config_entry.state is ConfigEntryState.LOADED
++    assert hass.states.get("climate.bathroom").state == "heat"
++
++
++async def test_setup_invalid_auth(
++    hass: HomeAssistant, mock_client: MagicMock, config_entry: MockConfigEntry
++) -> None:
++    """Rejected credentials require UI reauthentication."""
++    mock_client.async_get_thermostats.side_effect = AuthenticationError()
++    config_entry.add_to_hass(hass)
++    assert not await hass.config_entries.async_setup(config_entry.entry_id)
++    await hass.async_block_till_done(wait_background_tasks=True)
++    assert config_entry.state is ConfigEntryState.SETUP_ERROR
++    assert hass.config_entries.flow.async_progress()[0]["context"]["source"] == "reauth"
++
++
++@pytest.mark.usefixtures("mock_client")
++async def test_yaml_migration(
++    hass: HomeAssistant, entity_registry: er.EntityRegistry
++) -> None:
++    """Keep existing entity IDs, custom names, and integration identity."""
++    legacy = entity_registry.async_get_or_create(
++        "climate",
++        "schluter",
++        "TEST123",
++        suggested_object_id="warm_floor",
++    )
++    entity_registry.async_update_entity(legacy.entity_id, name="My warm floor")
++    assert await async_setup_component(hass, "schluter", {"schluter": ACCOUNT})
++    await hass.async_block_till_done(wait_background_tasks=True)
++    entries = hass.config_entries.async_entries("schluter")
++    assert len(entries) == 1
++    entity = entity_registry.async_get("climate.warm_floor")
++    assert entity.unique_id == "TEST123"
++    assert entity.name == "My warm floor"
++    assert entity.config_entry_id == entries[0].entry_id
++    assert hass.states.get("climate.warm_floor").state == "heat"
++    assert hass.states.get("climate.bathroom") is None
++
++
++async def test_unload(
++    hass: HomeAssistant,
++    setup_integration: MockConfigEntry,
++    mock_client: MagicMock,
++    freezer: FrozenDateTimeFactory,
++) -> None:
++    """Unloading stops polling and reloading creates no duplicate entities."""
++    assert await hass.config_entries.async_unload(setup_integration.entry_id)
++    calls = mock_client.async_get_thermostats.await_count
++    freezer.tick(timedelta(minutes=5))
++    async_fire_time_changed(hass, dt_util.utcnow())
++    await hass.async_block_till_done(wait_background_tasks=True)
++    assert mock_client.async_get_thermostats.await_count == calls
++    assert setup_integration.state is ConfigEntryState.NOT_LOADED
++    assert await hass.config_entries.async_setup(setup_integration.entry_id)
++    await hass.async_block_till_done(wait_background_tasks=True)
++    assert len(hass.states.async_entity_ids("climate")) == 1
++
++
++async def test_empty_account_discovers_later(
++    hass: HomeAssistant,
++    mock_client: MagicMock,
++    config_entry: MockConfigEntry,
++    freezer: FrozenDateTimeFactory,
++) -> None:
++    """Keep polling even if no entities were present on the first refresh."""
++    mock_client.async_get_thermostats.return_value = {}
++    config_entry.add_to_hass(hass)
++    assert await hass.config_entries.async_setup(config_entry.entry_id)
++    mock_client.async_get_thermostats.return_value = {"TEST123": THERMOSTAT}
++    freezer.tick(timedelta(seconds=70))
++    async_fire_time_changed(hass, dt_util.utcnow())
++    await hass.async_block_till_done(wait_background_tasks=True)
++    assert hass.states.get("climate.bathroom").state == "heat"
+diff --git a/tests/components/schluter/test_recovery.py b/tests/components/schluter/test_recovery.py
+new file mode 100644
+index 00000000..a86106fb
+--- /dev/null
++++ b/tests/components/schluter/test_recovery.py
+@@ -0,0 +1,128 @@
++"""Test recovery through the real API client and Home Assistant scheduler."""
++
++from datetime import timedelta
++import re
++
++from freezegun.api import FrozenDateTimeFactory
++import pytest
++from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
++from pytest_homeassistant.test_util.aiohttp import (
++    AiohttpClientMocker,
++    AiohttpClientMockResponse,
++)
++
++from homeassistant.config_entries import ConfigEntryState
++from homeassistant.core import HomeAssistant
++from homeassistant.util import dt as dt_util
++
++BASE_URL = "https://ditra-heat-e-wifi.schluter.com"
++THERMOSTAT_RESPONSE = {
++    "Groups": [
++        {
++            "Thermostats": [
++                {
++                    "SerialNumber": "TEST123",
++                    "Room": "Bathroom",
++                    "Temperature": 2250,
++                    "SetPointTemp": 2400,
++                    "MinTemp": 500,
++                    "MaxTemp": 4000,
++                    "Online": True,
++                    "Heating": True,
++                }
++            ]
++        }
++    ]
++}
++
++
++@pytest.mark.parametrize(
++    "read_statuses",
++    [
++        pytest.param([200, 503, 401, 200], id="outage-then-expired-session"),
++        pytest.param([200, 401, 401, 200], id="renewed-session-rejected"),
++    ],
++)
++async def test_network_and_session_recovery(
++    hass: HomeAssistant,
++    config_entry: MockConfigEntry,
++    aioclient_mock: AiohttpClientMocker,
++    freezer: FrozenDateTimeFactory,
++    read_statuses: list[int],
++) -> None:
++    """Polling continues after an outage or rejection of a freshly renewed session."""
++    statuses = iter(read_statuses)
++
++    async def respond(method: str, url: str, body: dict) -> AiohttpClientMockResponse:
++        return AiohttpClientMockResponse(
++            method, url, status=next(statuses), json=THERMOSTAT_RESPONSE
++        )
++
++    aioclient_mock.post(
++        BASE_URL + "/api/authenticate/user",
++        json={"ErrorCode": 0, "SessionId": "session"},
++    )
++    aioclient_mock.get(
++        re.compile(re.escape(BASE_URL + "/api/thermostats")), side_effect=respond
++    )
++    config_entry.add_to_hass(hass)
++    assert await hass.config_entries.async_setup(config_entry.entry_id)
++    await hass.async_block_till_done()
++    assert hass.states.get("climate.bathroom").state == "heat"
++
++    freezer.tick(timedelta(seconds=70))
++    async_fire_time_changed(hass, dt_util.utcnow())
++    await hass.async_block_till_done()
++    assert hass.states.get("climate.bathroom").state == "unavailable"
++    assert not hass.config_entries.flow.async_progress()
++
++    freezer.tick(timedelta(seconds=70))
++    async_fire_time_changed(hass, dt_util.utcnow())
++    await hass.async_block_till_done()
++    assert hass.states.get("climate.bathroom").state == "heat"
++    assert len(hass.config_entries.async_entries("schluter")) == 1
++    assert aioclient_mock.call_count == 7
++
++
++async def test_startup_repeated_session_rejection_recovers(
++    hass: HomeAssistant,
++    config_entry: MockConfigEntry,
++    aioclient_mock: AiohttpClientMocker,
++    freezer: FrozenDateTimeFactory,
++) -> None:
++    """Repeated 401s after successful logins keep setup retrying until reads work."""
++    statuses = iter([401, 401, 401, 401, 200])
++
++    async def respond(method: str, url: str, body: dict) -> AiohttpClientMockResponse:
++        return AiohttpClientMockResponse(
++            method, url, status=next(statuses), json=THERMOSTAT_RESPONSE
++        )
++
++    aioclient_mock.post(
++        BASE_URL + "/api/authenticate/user",
++        json={"ErrorCode": 0, "SessionId": "session"},
++    )
++    aioclient_mock.get(
++        re.compile(re.escape(BASE_URL + "/api/thermostats")), side_effect=respond
++    )
++    config_entry.add_to_hass(hass)
++    assert not await hass.config_entries.async_setup(config_entry.entry_id)
++    assert config_entry.state is ConfigEntryState.SETUP_RETRY
++    assert not hass.config_entries.flow.async_progress()
++    assert aioclient_mock.call_count == 4
++
++    freezer.tick(timedelta(minutes=5))
++    async_fire_time_changed(hass, dt_util.utcnow())
++    await hass.async_block_till_done(wait_background_tasks=True)
++    assert config_entry.state is ConfigEntryState.SETUP_RETRY
++    assert not hass.config_entries.flow.async_progress()
++    assert aioclient_mock.call_count == 8
++
++    freezer.tick(timedelta(minutes=5))
++    async_fire_time_changed(hass, dt_util.utcnow())
++    await hass.async_block_till_done(wait_background_tasks=True)
++    assert config_entry.state is ConfigEntryState.LOADED
++    assert hass.states.get("climate.bathroom").state == "heat"
++    assert not hass.config_entries.flow.async_progress()
++    assert len(hass.config_entries.async_entries("schluter")) == 1
++    assert aioclient_mock.call_count == 10

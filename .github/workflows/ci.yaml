@@ -1,0 +1,64 @@
+name: Validate release candidate
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: home-assistant/core
+          ref: 2026.11.1
+          path: .upstream
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: false
+          python-version: 3.14.10
+      - name: Apply prepared Core changes
+        run: git -C .upstream apply ../upstream/core.patch
+      - name: Install development dependencies
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python -e .upstream -e .upstream/packages/hassfest -e '.upstream/packages/pytest-homeassistant[bluetooth]' -e library -r .upstream/requirements_test.txt aioresponses==0.7.9 build
+      - name: Prepare translations
+        working-directory: .upstream
+        run: ../.venv/bin/python -m script.translations develop --all
+      - name: Test Core integration
+        working-directory: .upstream
+        run: |
+          ../.venv/bin/python -m pytest tests/components/schluter -q --cov=homeassistant.components.schluter --cov-branch --cov-report=json:../coverage-core.json
+          ../.venv/bin/python ../tools/check_coverage.py ../coverage-core.json
+      - name: Test installable package and bundled client
+        run: |
+          .venv/bin/python -m pytest tests -q --cov=custom_components.schluter --cov-report=json:coverage-package.json
+          .venv/bin/python tools/check_coverage.py coverage-package.json
+      - name: Test diagnostic privacy and request limits
+        run: .venv/bin/python -m pytest tools/tests -q
+      - name: Lint and validate metadata
+        run: |
+          .venv/bin/ruff check .
+          .venv/bin/ruff format --check .
+          cd .upstream
+          ../.venv/bin/python -m script.hassfest --integration-path homeassistant/components/schluter
+          ../.venv/bin/python -m script.hassfest --integration-path ../custom_components/schluter
+      - name: Build installable archive
+        run: .venv/bin/python tools/package.py .upstream
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: schluter-release-candidate
+          path: dist/schluter.zip
+  hassfest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: home-assistant/actions/hassfest@86d4564712fa02543c808e3a693dd04f9d3f8361
