@@ -22,7 +22,7 @@ submission checks and independent library publication remain pending.
 
 Attach `dist/schluter.zip` to the prerelease. Its SHA256 is:
 
-`8e0ec9a4949553e0323b538ca855029d0a7cb70f356ca8df4350076bed940714`
+`66089389d9726bc19285c3689b481daafacfc02fb8be89d6630942f23e0a7b40`
 
 Follow the README for backup, migration and rollback. Setting a target retains
 the existing permanent/manual behavior and disables vacation mode. Thermostat

@@ -21,7 +21,11 @@ HA's Mapping input type, user flows start at their actual initial form, and
 error-path tests demonstrate successful completion after correction.
 
 Rc2 archive verification passed (14 files, valid ZIP, correct manifest version).
-SHA256: `8e0ec9a4949553e0323b538ca855029d0a7cb70f356ca8df4350076bed940714`.
+SHA256: `66089389d9726bc19285c3689b481daafacfc02fb8be89d6630942f23e0a7b40`.
 Targeted Core and custom-package hassfest both report zero invalid integrations.
 GitHub repository lookup on November 17 still cannot resolve
 `baccula/ha-schluter` with the connected account, so publication remains blocked.
+
+Focused mypy (`--follow-imports=silent`) passes all five integration source
+modules after removal of an invalid override marker on the dynamic reauth step.
+Workflow security audit (zizmor) reports no findings, with 12 suppressions.
