@@ -1,0 +1,78 @@
+name: Publish integration prerelease
+on:
+  workflow_dispatch:
+    inputs:
+      validation_run_id:
+        description: Successful Validate release candidate run for this exact main commit
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify successful validation of this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
+        run: |
+          [[ "$VALIDATION_RUN_ID" =~ ^[0-9]+$ ]]
+          gh run view "$VALIDATION_RUN_ID" --repo "$GITHUB_REPOSITORY" --json conclusion,headSha,workflowName > validation.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          run = json.loads(Path("validation.json").read_text())
+          assert run["conclusion"] == "success", "Validation did not succeed"
+          assert run["headSha"] == os.environ["GITHUB_SHA"], "Validation is for another commit"
+          assert run["workflowName"] == "Validate release candidate", "Unexpected workflow"
+          PY
+          gh run download "$VALIDATION_RUN_ID" --repo "$GITHUB_REPOSITORY" --name schluter-release-candidate --dir dist
+      - name: Verify archive and prepare checksums and release notes
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import re
+          from pathlib import Path
+          from zipfile import ZipFile
+          archive = Path("dist/schluter.zip")
+          with ZipFile(archive) as package:
+              assert package.testzip() is None, "Corrupt archive"
+              manifest = json.loads(package.read("manifest.json"))
+              assert manifest["domain"] == "schluter"
+              assert manifest["version"] == "0.1.0rc2"
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          Path("dist/SHA256SUMS").write_text(f"{digest}  schluter.zip\n")
+          notes = Path("docs/release-notes-0.1.0rc2.md").read_text()
+          notes = notes.replace("Attach `dist/schluter.zip` to the prerelease.", "Download `schluter.zip` below or install through a Marketplace custom repository.")
+          notes = re.sub(r"`[0-9a-f]{64}`", f"`{digest}`", notes)
+          notes += "\nInstallation and migration: https://github.com/baccula/ha-schluter#install-through-marketplace\n"
+          Path("release-notes.md").write_text(notes)
+          print(f"Verified release archive SHA256: {digest}")
+          PY
+      - name: Publish prerelease and assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v0.1.0rc2 dist/schluter.zip dist/SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Schluter 0.1.0rc2" --notes-file release-notes.md --prerelease
+  marketplace:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hacs/action@1ebf01c408f29afcb6406bd431bc98fd8cbb15aa
+        with:
+          category: integration
