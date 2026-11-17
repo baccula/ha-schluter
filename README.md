@@ -9,7 +9,7 @@ stable operation beyond 48 hours, temperature control, and existing automations.
 See the [acceptance record](docs/acceptance.md#home-acceptance-update).
 Automated tests also use synthetic responses. This is not an officially awarded
 Home Assistant quality tier; the implementation is evaluated against the Bronze
-and Silver rules. Publication and remaining Core checks are still pending.
+and Silver rules. Remaining Core submission checks and standalone library publication are pending.
 See [review and feature parity](docs/review.md), [quality evidence](docs/quality.md),
 and [acceptance testing](docs/acceptance.md).
 
@@ -32,7 +32,7 @@ This package deliberately retains the `schluter` domain to preserve existing
 entities. It replaces the built-in integration and therefore uses a **custom
 repository link**, not the public Marketplace catalog.
 
-Once the release candidate has been published:
+Install the latest prerelease from this repository:
 
 1. Create a Home Assistant backup, including configuration and entity registries.
 2. Add this repository in **Settings > Marketplace** as a custom integration

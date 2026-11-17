@@ -10,7 +10,7 @@ See the [home acceptance update](acceptance.md#home-acceptance-update).
 - Standalone client wheel and source distribution built successfully.
 - Five test warnings originate from upstream Home Assistant/aiohttp and backoff deprecations, not integration failures.
 - Repository-wide checks are not green: full setup encountered a missing autoconf dependency building DTLSSocket; the earlier full hassfest run encountered missing hassil (now installed); full mypy reported duplicate hass_dict.py/.pyi modules; pylint also failed in the repository-wide run; the identified Schluter-specific findings now pass targeted pylint. Generated-file formatting changes were incorporated. These broader checks must be completed before upstream submission.
-- GitHub-hosted workflows and HACS release validation have not run: the GitHub connection denied creating baccula/ha-schluter. The Core branch was successfully pushed to baccula/core at codex/schluter-modernization.
+- GitHub-hosted validation passed on the uploaded candidate: Core tests, package tests, diagnostic tests, lint, targeted metadata validation, package build, and the standalone hassfest action. Evidence: https://github.com/baccula/ha-schluter/actions/runs/44184518459. Marketplace release validation runs after publication. The Core branch is available at baccula/core, codex/schluter-modernization.
 - The maintainer confirmed automatic recovery without HA restart/reload on November 12, then stable operation beyond 48 hours, working temperature control and existing automations on November 17. These are user-reported results on rc1. The agent has not accessed the real account or changed heating settings.
 - The standalone schluter-wifi package is not published on PyPI; publication is required before submitting the Core dependency change.
 
@@ -21,10 +21,10 @@ HA's Mapping input type, user flows start at their actual initial form, and
 error-path tests demonstrate successful completion after correction.
 
 Rc2 archive verification passed (14 files, valid ZIP, correct manifest version).
-SHA256: `66089389d9726bc19285c3689b481daafacfc02fb8be89d6630942f23e0a7b40`.
+Locally verified archive SHA256: `66089389d9726bc19285c3689b481daafacfc02fb8be89d6630942f23e0a7b40`.
 Targeted Core and custom-package hassfest both report zero invalid integrations.
-GitHub repository lookup on November 17 still cannot resolve
-`baccula/ha-schluter` with the connected account, so publication remains blocked.
+The maintainer created `baccula/ha-schluter` on November 17 and approved
+Apache-2.0 for the integration. The prepared source is now on its main branch.
 
 Focused mypy (`--follow-imports=silent`) passes all five integration source
 modules after removal of an invalid override marker on the dynamic reauth step.
