@@ -32,16 +32,23 @@ This package deliberately retains the `schluter` domain to preserve existing
 entities. It replaces the built-in integration and therefore uses a **custom
 repository link**, not the public Marketplace catalog.
 
-Install the latest prerelease from this repository:
+Install the published `v0.1.0rc2` prerelease:
 
 1. Create a Home Assistant backup, including configuration and entity registries.
 2. Add this repository in **Settings > Marketplace** as a custom integration
-   repository. Enable prerelease versions if installing a release candidate.
-3. Install the release and acknowledge that it replaces a built-in integration.
+   repository, then open its Marketplace page.
+3. Open the three-dot menu, choose **Install another version**, and select
+   **`v0.1.0rc2`**. Acknowledge that it replaces a built-in integration.
 4. Restart Home Assistant so it loads the replacement.
 5. Follow the migration or fresh-setup instructions below.
 
 [Open the repository in Marketplace](https://my.home-assistant.io/redirect/marketplace_repository/?owner=baccula&repository=ha-schluter&category=integration)
+
+**Include pre-releases** in the same menu makes Marketplace offer the prerelease
+by default. If a previous attempt tried to download `releases/download/main/schluter.zip`,
+choose **Refresh information** before retrying. When Marketplace selects `main`,
+it now installs the integration from the repository files. Choose `v0.1.0rc2`
+to install the published package and record that version in Marketplace.
 
 For manual installation, extract the contents of `schluter.zip` into
 `<config>/custom_components/schluter/`, then restart. `manifest.json` must be

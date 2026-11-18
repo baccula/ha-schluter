@@ -1,6 +1,4 @@
 {
   "name": "Schluter DITRA-HEAT — recovery and GUI setup",
-  "homeassistant": "2026.11.1",
-  "zip_release": true,
-  "filename": "schluter.zip"
+  "homeassistant": "2026.11.1"
 }
