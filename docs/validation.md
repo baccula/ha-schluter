@@ -46,3 +46,13 @@ verified identical between the CI and local builds before publication.
 Marketplace repository validation passed all 10 checks after the maintainer
 added the repository description and topics.
 [Marketplace validation run](https://github.com/baccula/ha-schluter/actions/runs/44216448325).
+
+The first Marketplace install attempt fell back to `main` and tried to download
+a release ZIP for that branch. The repository now serves source files when
+Marketplace selects `main`. The tagged rc2 release still provides its ZIP.
+Local installer checks verified both paths, and the public archives contained
+the same 14 integration files. [Marketplace validation after the fix](https://github.com/baccula/ha-schluter/actions/runs/44217461280).
+
+The maintainer confirmed that installation through Marketplace worked after
+the fix. The earlier live thermostat control and recovery results are recorded
+separately in [home acceptance](acceptance.md#home-acceptance-update).
