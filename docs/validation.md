@@ -43,8 +43,6 @@ Published archive SHA256: `956a049b333ee5b1a53f3aca820a757cea632d0702bddf17d3d73
 ZIP timestamps differ from the local build; all 14 packaged file contents were
 verified identical between the CI and local builds before publication.
 
-Marketplace validation passed 8 of 10 checks. The remaining checks require a
-repository description and topics. GitHub denied editing these repository
-settings through the connection (HTTP 403), so the maintainer was asked to add
-them before validation is rerun. The failed job did not report an integration
-manifest, license, brands, or package-metadata error.
+Marketplace repository validation passed all 10 checks after the maintainer
+added the repository description and topics.
+[Marketplace validation run](https://github.com/baccula/ha-schluter/actions/runs/44216448325).
